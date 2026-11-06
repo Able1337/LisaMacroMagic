@@ -1,0 +1,23 @@
+{
+  "format": 1,
+  "scenarios": [
+    {
+      "id": "manual-map-example",
+      "name": "Карта — ручной выбор объекта (пример)",
+      "bind": "F6",
+      "steps": [
+        {"type": "keys", "value": "z"},
+        {"type": "wait_click", "seconds": 120},
+        {"type": "keys", "value": "enter"},
+        {"type": "delay", "seconds": 0.5},
+        {"type": "keys", "value": "ctrl+shift+s"}
+      ]
+    },
+    {
+      "id": "second-bind-example",
+      "name": "Второй бинд — пауза без ввода",
+      "bind": "F7",
+      "steps": [{"type": "delay", "seconds": 2}]
+    }
+  ]
+}
