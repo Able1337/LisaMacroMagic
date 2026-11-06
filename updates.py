@@ -3,10 +3,7 @@ import json
 import re
 import hashlib
 import tempfile
-import threading
 from pathlib import Path
-from urllib.request import Request,urlopen
-from urllib.parse import urlsplit
 
 from PySide6.QtCore import QObject,QTimer,QUrl,Signal
 from PySide6.QtNetwork import QNetworkAccessManager,QNetworkReply,QNetworkRequest
@@ -15,6 +12,12 @@ REPOSITORY='Able1337/LisaMacroMagic'
 API_URL=f'https://api.github.com/repos/{REPOSITORY}/releases/latest'
 RELEASE_URL=f'https://github.com/{REPOSITORY}/releases/tag/'
 MAX_BYTES=256*1024
+DOWNLOAD_HOSTS={'github.com','release-assets.githubusercontent.com','objects.githubusercontent.com'}
+
+
+def trusted_download(url):
+    return (url.isValid() and url.scheme()=='https' and url.host() in DOWNLOAD_HOSTS
+            and url.port(443)==443 and not url.userInfo())
 
 
 def version(value):
@@ -43,6 +46,7 @@ def available_release(body,current):
 class UpdateCheck(QObject):
     finished=Signal(object,str)
     downloaded=Signal(object,str)
+    progress=Signal(int,int)
 
     def __init__(self,current,parent=None):
         super().__init__(parent)
@@ -80,27 +84,75 @@ class UpdateCheck(QObject):
         self.finished.emit(*result)
 
     def download(self,release,target):
-        def run():
-            stage=None
-            try:
-                _,url,digest,size=release
-                stage=Path(tempfile.mkdtemp(prefix='.lisa-update-',dir=target.parent))
-                request=Request(url,headers={'User-Agent':'LisaMacroMagic/'+self.current})
-                with urlopen(request,timeout=12) as response, (stage/'ready.exe').open('wb') as out:
-                    endpoint=urlsplit(response.geturl())
-                    if endpoint.scheme!='https' or endpoint.hostname not in {'github.com','release-assets.githubusercontent.com','objects.githubusercontent.com'}:
-                        raise ValueError('Неожиданный адрес загрузки.')
-                    checksum=hashlib.sha256(); count=0
-                    while chunk:=response.read(256*1024):
-                        count+=len(chunk)
-                        if count>size: raise ValueError('Размер файла не совпадает с релизом.')
-                        checksum.update(chunk); out.write(chunk)
-                if count!=size or checksum.hexdigest()!=digest:
-                    raise ValueError('Контрольная сумма не совпадает с релизом.')
-                self.downloaded.emit(stage,'')
-            except Exception as exc:
-                if stage:
-                    try: (stage/'ready.exe').unlink(missing_ok=True); stage.rmdir()
-                    except OSError: pass
-                self.downloaded.emit(None,str(exc))
-        threading.Thread(target=run,daemon=True).start()
+        _,url,digest,size=release
+        stage=None
+        try:
+            stage=Path(tempfile.mkdtemp(prefix='.lisa-update-',dir=target.parent))
+            out=(stage/'ready.exe').open('xb')
+        except OSError as exc:
+            if stage:
+                try: stage.rmdir()
+                except OSError: pass
+            self.downloaded.emit(None,f'Не удалось подготовить файл рядом с EXE: {exc}')
+            return
+        checksum=hashlib.sha256()
+        count=0
+        error=''
+
+        def finish(message=''):
+            try: out.close()
+            except OSError as exc: message=message or f'Ошибка записи файла: {exc}'
+            if message:
+                try: (stage/'ready.exe').unlink(missing_ok=True); stage.rmdir()
+                except OSError: pass
+            self.downloaded.emit(None if message else stage,message)
+
+        def get(endpoint,redirects=0):
+            nonlocal error
+            if redirects>5 or not trusted_download(endpoint):
+                finish('GitHub перенаправил загрузку на неожиданный адрес.'); return
+            request=QNetworkRequest(endpoint)
+            request.setRawHeader(b'User-Agent',b'LisaMacroMagic/'+self.current.encode('ascii'))
+            request.setAttribute(QNetworkRequest.Attribute.RedirectPolicyAttribute,QNetworkRequest.RedirectPolicy.ManualRedirectPolicy)
+            reply=self.network.get(request)
+            timer=QTimer(reply); timer.setSingleShot(True); timer.timeout.connect(reply.abort); timer.start(120000)
+
+            def read(abort=True):
+                nonlocal count,error
+                status=reply.attribute(QNetworkRequest.Attribute.HttpStatusCodeAttribute)
+                if status!=200 or error:
+                    reply.readAll(); return
+                while reply.bytesAvailable():
+                    chunk=bytes(reply.read(256*1024))
+                    if not chunk: break
+                    count+=len(chunk)
+                    if count>size:
+                        error='Размер файла не совпадает с релизом.'
+                        if abort: reply.abort()
+                        return
+                    try: out.write(chunk)
+                    except OSError as exc:
+                        error=f'Ошибка записи файла: {exc}'
+                        if abort: reply.abort()
+                        return
+                    checksum.update(chunk)
+                self.progress.emit(count,size)
+
+            def completed():
+                timer.stop()
+                status=reply.attribute(QNetworkRequest.Attribute.HttpStatusCodeAttribute)
+                redirect=reply.attribute(QNetworkRequest.Attribute.RedirectionTargetAttribute)
+                reply.deleteLater()
+                if error: finish(error); return
+                if status in (301,302,303,307,308) and isinstance(redirect,QUrl):
+                    get(endpoint.resolved(redirect),redirects+1); return
+                if status!=200 or reply.error()!=QNetworkReply.NetworkError.NoError:
+                    finish(f'Не удалось загрузить EXE с GitHub ({status or "сеть"}): {reply.errorString()}'); return
+                read(False)
+                finish(error or ('Контрольная сумма или размер не совпадают с релизом.'
+                                  if count!=size or checksum.hexdigest()!=digest else ''))
+
+            reply.readyRead.connect(read)
+            reply.finished.connect(completed)
+
+        get(QUrl(url))

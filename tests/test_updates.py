@@ -3,11 +3,16 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
-from updates import available_release
+from PySide6.QtCore import QUrl
+from updates import available_release,trusted_download
 import update_install
 
 
 class UpdatesTests(unittest.TestCase):
+    def test_download_redirects_stay_on_approved_https_hosts(self):
+        self.assertTrue(trusted_download(QUrl('https://release-assets.githubusercontent.com/test')))
+        for url in ('http://github.com/test','https://github.com.evil.test/test','https://github.com:444/test','https://user@github.com/test'):
+            self.assertFalse(trusted_download(QUrl(url)),url)
     def release(self):
         return {'tag_name':'v0.5.12','draft':False,'prerelease':False,'assets':[
             {'name':'LisaMacroMagic_v0.5.12.exe','state':'uploaded','size':100,'digest':'sha256:'+'a'*64}]}

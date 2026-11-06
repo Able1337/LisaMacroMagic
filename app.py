@@ -1,4 +1,4 @@
-"""Lisa's Macro Magic 0.5.13 — user-configured local macro studio."""
+"""Lisa's Macro Magic 0.5.14 — user-configured local macro studio."""
 import copy
 import ctypes
 import json
@@ -18,10 +18,10 @@ from PySide6.QtWidgets import (QApplication, QWidget, QMainWindow, QVBoxLayout, 
     QMessageBox, QFileDialog, QAbstractItemView, QMenu, QSystemTrayIcon)
 import model
 from engine import Player, Recorder, foreground
-from updates import UpdateCheck
+from updates import UpdateCheck, RELEASE_URL
 import update_install
 
-VERSION = '0.5.13'
+VERSION = '0.5.14'
 STYLE = """
 QMainWindow, QDialog { background:#fff0f7; color:#684366; }
 QWidget { font-family:'Segoe UI'; font-size:14px; color:#684366; }
@@ -158,7 +158,7 @@ class StepDialog(QDialog):
 class Window(QMainWindow):
     def __init__(self, native=True, persistence_path=None):
         super().__init__()
-        self.setWindowTitle("Lisa's Macro Magic 🎀 — v0.5.13")
+        self.setWindowTitle("Lisa's Macro Magic 🎀 — v0.5.14")
         self.resize(1150,850); self.setMinimumSize(1050,760)
         self.setWindowIcon(icon())
         self.setStyleSheet(STYLE)
@@ -196,7 +196,7 @@ class Window(QMainWindow):
         self.affirmation=AffirmationCard(); header.addWidget(self.affirmation); outer.addLayout(header)
         subtitle_row=QHBoxLayout()
         subtitle = QLabel('Твои сценарии. Твои бинды. Немножко магии ♡'); subtitle.setObjectName('muted'); subtitle_row.addWidget(subtitle); subtitle_row.addStretch()
-        version = QLabel('PINK EDITION  /  0.5.13'); version.setObjectName('muted'); subtitle_row.addWidget(version); outer.addLayout(subtitle_row)
+        version = QLabel('PINK EDITION  /  0.5.14'); version.setObjectName('muted'); subtitle_row.addWidget(version); outer.addLayout(subtitle_row)
         toolbar = QHBoxLayout()
         self.open_btn = self.button('Открыть JSON',self.open_file,toolbar)
         self.save_btn = self.button('Сохранить',self.save_file,toolbar)
@@ -205,6 +205,7 @@ class Window(QMainWindow):
         self.update_checker=UpdateCheck(VERSION,self)
         self.update_checker.finished.connect(self.update_finished)
         self.update_checker.downloaded.connect(self.update_downloaded)
+        self.update_checker.progress.connect(self.update_progress)
         self.update_btn=self.button('Обновить',self.check_updates,toolbar)
         self.update_btn.setToolTip('Проверить GitHub Releases и предложить обновление.')
         toolbar.addStretch()
@@ -316,7 +317,7 @@ class Window(QMainWindow):
         except (OSError,ValueError) as exc:
             self.set_status('Не сохранено автоматически: '+str(exc)); return False
         self.dirty=False
-        self.setWindowTitle("Lisa's Macro Magic 🎀 — v0.5.13")
+        self.setWindowTitle("Lisa's Macro Magic 🎀 — v0.5.14")
         return True
 
     def button(self,text,slot,layout,style=None):
@@ -367,16 +368,37 @@ class Window(QMainWindow):
         if self.busy() or self.downloading or not self.release: return
         if not getattr(sys,'frozen',False):
             self.set_status(f'Доступна версия {self.release[0]}. Самообновление доступно из EXE.'); return
-        answer=QMessageBox.question(self,'Обновление 🎀',f'Доступна версия {self.release[0]}. Скачать, заменить текущий EXE и перезапустить приложение?',QMessageBox.StandardButton.Yes|QMessageBox.StandardButton.No,QMessageBox.StandardButton.No)
-        if answer!=QMessageBox.StandardButton.Yes: return
+        dialog=QMessageBox(QMessageBox.Icon.Question,'Обновление 🎀',f'Доступна версия {self.release[0]}. Скачать, заменить текущий EXE и перезапустить приложение?',parent=self)
+        install=dialog.addButton('Обновить',QMessageBox.ButtonRole.AcceptRole)
+        manual=dialog.addButton('Скачать вручную',QMessageBox.ButtonRole.ActionRole)
+        cancel=dialog.addButton('Позже',QMessageBox.ButtonRole.RejectRole)
+        dialog.setDefaultButton(cancel)
+        dialog.exec()
+        if dialog.clickedButton()==manual: self.open_release(); return
+        if dialog.clickedButton()!=install: return
         self.downloading=True
-        self.update_btn.setEnabled(False); self.update_btn.setText('Скачиваю…')
+        self.update_btn.setEnabled(False); self.update_btn.setText('Загрузка: 0%')
         self.update_checker.download(self.release,Path(sys.executable).resolve())
+
+    def update_progress(self,received,total):
+        if self.downloading and total>0:
+            self.update_btn.setText(f'Загрузка: {min(100,received*100//total)}%')
+
+    def open_release(self):
+        url=self.release[1].rsplit('/',1)[0].replace('/releases/download/','/releases/tag/') if self.release else RELEASE_URL.rsplit('tag/',1)[0]+'latest'
+        QDesktopServices.openUrl(QUrl(url))
 
     def update_downloaded(self,stage,error):
         self.downloading=False
         self.update_btn.setEnabled(True); self.update_btn.setText('Обновить')
-        if error: self.error('Обновление не скачано: '+error); return
+        if error:
+            dialog=QMessageBox(QMessageBox.Icon.Warning,'Обновление не скачано',error,parent=self)
+            manual=dialog.addButton('Скачать вручную',QMessageBox.ButtonRole.ActionRole)
+            close=dialog.addButton('Закрыть',QMessageBox.ButtonRole.RejectRole)
+            dialog.setDefaultButton(close)
+            dialog.exec()
+            if dialog.clickedButton()==manual: self.open_release()
+            return
         self.update_stage=stage
         self.exit_from_tray()
 
@@ -417,7 +439,7 @@ class Window(QMainWindow):
     def selected(self): return self.scenarios[self.current] if self.current is not None else None
     def changed(self):
         self.dirty=True
-        self.setWindowTitle("Lisa's Macro Magic 🎀 — v0.5.13 *")
+        self.setWindowTitle("Lisa's Macro Magic 🎀 — v0.5.14 *")
         self.auto_timer.start()
 
     def details_edited(self): self.details_dirty=True; self.changed()
@@ -643,7 +665,7 @@ class Window(QMainWindow):
             model.save(path,self.scenarios,self.settings)
         except (OSError,ValueError) as exc: self.error(exc); return False
         if not save_as: self.autosave_blocked=False; self.dirty=False
-        self.setWindowTitle("Lisa's Macro Magic 🎀 — v0.5.13"); self.set_status(f'Сохранено ♡ {path}'); return True
+        self.setWindowTitle("Lisa's Macro Magic 🎀 — v0.5.14"); self.set_status(f'Сохранено ♡ {path}'); return True
 
     def copy_diagnostics(self):
         import platform,struct,tempfile

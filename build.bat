@@ -14,9 +14,9 @@ if errorlevel 1 goto failed
 if errorlevel 1 goto failed
 ".venv\Scripts\python.exe" -m unittest discover -s tests -v
 if errorlevel 1 goto failed
-".venv\Scripts\python.exe" -m PyInstaller --noconfirm --clean --onefile --windowed --noupx --hidden-import pynput.keyboard._win32 --hidden-import pynput.mouse._win32 --icon assets\fox.ico --add-data "assets;assets" --name LisaMacroMagic_v0.5.13 app.py
+".venv\Scripts\python.exe" -m PyInstaller --noconfirm --clean --onefile --windowed --noupx --hidden-import pynput.keyboard._win32 --hidden-import pynput.mouse._win32 --icon assets\fox.ico --add-data "assets;assets" --name LisaMacroMagic_v0.5.14 app.py
 if errorlevel 1 goto failed
-echo Ready: dist\LisaMacroMagic_v0.5.13.exe
+echo Ready: dist\LisaMacroMagic_v0.5.14.exe
 exit /b 0
 :failed
 echo Build failed. See errors above.
