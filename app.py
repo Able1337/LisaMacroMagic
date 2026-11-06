@@ -1,4 +1,4 @@
-"""Lisa's Macro Magic 0.5.12 — user-configured local macro studio."""
+"""Lisa's Macro Magic 0.5.13 — user-configured local macro studio."""
 import copy
 import ctypes
 import json
@@ -21,7 +21,7 @@ from engine import Player, Recorder, foreground
 from updates import UpdateCheck
 import update_install
 
-VERSION = '0.5.12'
+VERSION = '0.5.13'
 STYLE = """
 QMainWindow, QDialog { background:#fff0f7; color:#684366; }
 QWidget { font-family:'Segoe UI'; font-size:14px; color:#684366; }
@@ -158,7 +158,7 @@ class StepDialog(QDialog):
 class Window(QMainWindow):
     def __init__(self, native=True, persistence_path=None):
         super().__init__()
-        self.setWindowTitle("Lisa's Macro Magic 🎀 — v0.5.12")
+        self.setWindowTitle("Lisa's Macro Magic 🎀 — v0.5.13")
         self.resize(1150,850); self.setMinimumSize(1050,760)
         self.setWindowIcon(icon())
         self.setStyleSheet(STYLE)
@@ -196,7 +196,7 @@ class Window(QMainWindow):
         self.affirmation=AffirmationCard(); header.addWidget(self.affirmation); outer.addLayout(header)
         subtitle_row=QHBoxLayout()
         subtitle = QLabel('Твои сценарии. Твои бинды. Немножко магии ♡'); subtitle.setObjectName('muted'); subtitle_row.addWidget(subtitle); subtitle_row.addStretch()
-        version = QLabel('PINK EDITION  /  0.5.12'); version.setObjectName('muted'); subtitle_row.addWidget(version); outer.addLayout(subtitle_row)
+        version = QLabel('PINK EDITION  /  0.5.13'); version.setObjectName('muted'); subtitle_row.addWidget(version); outer.addLayout(subtitle_row)
         toolbar = QHBoxLayout()
         self.open_btn = self.button('Открыть JSON',self.open_file,toolbar)
         self.save_btn = self.button('Сохранить',self.save_file,toolbar)
@@ -316,7 +316,7 @@ class Window(QMainWindow):
         except (OSError,ValueError) as exc:
             self.set_status('Не сохранено автоматически: '+str(exc)); return False
         self.dirty=False
-        self.setWindowTitle("Lisa's Macro Magic 🎀 — v0.5.12")
+        self.setWindowTitle("Lisa's Macro Magic 🎀 — v0.5.13")
         return True
 
     def button(self,text,slot,layout,style=None):
@@ -417,7 +417,7 @@ class Window(QMainWindow):
     def selected(self): return self.scenarios[self.current] if self.current is not None else None
     def changed(self):
         self.dirty=True
-        self.setWindowTitle("Lisa's Macro Magic 🎀 — v0.5.12 *")
+        self.setWindowTitle("Lisa's Macro Magic 🎀 — v0.5.13 *")
         self.auto_timer.start()
 
     def details_edited(self): self.details_dirty=True; self.changed()
@@ -643,7 +643,7 @@ class Window(QMainWindow):
             model.save(path,self.scenarios,self.settings)
         except (OSError,ValueError) as exc: self.error(exc); return False
         if not save_as: self.autosave_blocked=False; self.dirty=False
-        self.setWindowTitle("Lisa's Macro Magic 🎀 — v0.5.12"); self.set_status(f'Сохранено ♡ {path}'); return True
+        self.setWindowTitle("Lisa's Macro Magic 🎀 — v0.5.13"); self.set_status(f'Сохранено ♡ {path}'); return True
 
     def copy_diagnostics(self):
         import platform,struct,tempfile
