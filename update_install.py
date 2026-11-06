@@ -6,6 +6,16 @@ import shutil
 import subprocess
 import sys
 import time
+import tempfile
+
+EXE_NAME='LisaMacroMagic.exe'
+
+
+def destination_for(target):
+    destination=target.with_name(EXE_NAME)
+    if destination!=target and os.path.lexists(destination):
+        raise FileExistsError(f'Файл {EXE_NAME} уже существует рядом с текущим EXE. Он не был заменён.')
+    return destination
 
 
 def launch(path,*args):
@@ -18,6 +28,7 @@ def valid_stage(stage,target):
 
 
 def start_install(stage,target):
+    destination_for(target)
     helper=stage/'helper.exe'
     shutil.copyfile(target,helper)
     launch(helper,'--apply-update',stage,target)
@@ -26,19 +37,34 @@ def start_install(stage,target):
 def replace(stage,target):
     ready,backup=stage/'ready.exe',stage/'backup.exe'
     if not valid_stage(stage,target) or not ready.is_file() or backup.exists(): raise ValueError('Некорректная папка обновления.')
+    destination=destination_for(target)
     deadline=time.monotonic()+30
     while True:
         try: os.replace(target,backup); break
         except PermissionError:
             if time.monotonic()>=deadline: raise
             time.sleep(.25)
+    installed=False
     try:
-        os.replace(ready,target)
-        launch(target,'--update-cleanup',stage)
+        # On Windows rename fails if another file already occupies the destination.
+        os.rename(ready,destination)
+        installed=True
+        launch(destination,'--update-cleanup',stage)
     except Exception:
-        os.replace(backup,target)
+        if installed: os.rename(destination,ready)
+        os.rename(backup,target)
         launch(target)
         raise
+
+
+def stage_name_migration(target):
+    destination_for(target)
+    stage=Path(tempfile.mkdtemp(prefix='.lisa-update-',dir=target.parent))
+    try: shutil.copyfile(target,stage/'ready.exe')
+    except OSError:
+        cleanup(stage,target)
+        raise
+    return stage
 
 
 def helper_main(stage,target):

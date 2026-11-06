@@ -32,14 +32,15 @@ def available_release(body,current):
         raise ValueError('Ответ GitHub не содержит стабильного релиза.')
     tag=data.get('tag_name')
     if version(tag)<=version(current): return None
-    name=f'LisaMacroMagic_v{tag.removeprefix("v")}.exe'
+    names=('LisaMacroMagic.exe',f'LisaMacroMagic_v{tag.removeprefix("v")}.exe')
     assets=data.get('assets')
     if not isinstance(assets,list): raise ValueError('Missing assets')
-    for asset in assets:
-        if not isinstance(asset,dict) or asset.get('name')!=name or asset.get('state')!='uploaded': continue
-        digest=asset.get('digest'); size=asset.get('size')
-        if isinstance(digest,str) and re.fullmatch(r'sha256:[0-9a-f]{64}',digest) and type(size) is int and 0<size<=150*1024*1024:
-            return tag.removeprefix('v'),f'https://github.com/{REPOSITORY}/releases/download/{tag}/{name}',digest[7:],size
+    for name in names:
+        for asset in assets:
+            if not isinstance(asset,dict) or asset.get('name')!=name or asset.get('state')!='uploaded': continue
+            digest=asset.get('digest'); size=asset.get('size')
+            if isinstance(digest,str) and re.fullmatch(r'sha256:[0-9a-f]{64}',digest) and type(size) is int and 0<size<=150*1024*1024:
+                return tag.removeprefix('v'),f'https://github.com/{REPOSITORY}/releases/download/{tag}/{name}',digest[7:],size
     raise ValueError('Нет проверяемого EXE для релиза.')
 
 

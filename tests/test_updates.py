@@ -31,14 +31,21 @@ class UpdatesTests(unittest.TestCase):
         release['prerelease']=True
         with self.assertRaises(ValueError): available_release(json.dumps(release),'0.5.11')
 
-    def test_replace_and_restart_same_path(self):
+    def test_prefers_unversioned_release_asset(self):
+        release=self.release()
+        release['assets'].append(dict(release['assets'][0],name='LisaMacroMagic.exe'))
+        self.assertTrue(available_release(json.dumps(release),'0.5.11')[1].endswith('/LisaMacroMagic.exe'))
+
+    def test_replace_and_restart_under_canonical_name(self):
         with tempfile.TemporaryDirectory() as tmp:
             target=Path(tmp)/'renamed.exe'; target.write_bytes(b'old')
+            destination=target.with_name('LisaMacroMagic.exe')
             stage=Path(tmp)/'.lisa-update-test'; stage.mkdir(); (stage/'ready.exe').write_bytes(b'new')
             with patch.object(update_install,'launch') as launch:
                 update_install.replace(stage,target)
-                launch.assert_called_once_with(target,'--update-cleanup',stage)
-            self.assertEqual(target.read_bytes(),b'new')
+                launch.assert_called_once_with(destination,'--update-cleanup',stage)
+            self.assertFalse(target.exists())
+            self.assertEqual(destination.read_bytes(),b'new')
             self.assertEqual((stage/'backup.exe').read_bytes(),b'old')
 
     def test_failed_restart_restores_old_exe(self):
@@ -49,3 +56,19 @@ class UpdatesTests(unittest.TestCase):
                 with self.assertRaises(OSError): update_install.replace(stage,target)
                 self.assertEqual(launch.call_args.args,(target,))
             self.assertEqual(target.read_bytes(),b'old')
+            self.assertFalse(target.with_name('LisaMacroMagic.exe').exists())
+
+    def test_existing_canonical_file_is_not_overwritten(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target=Path(tmp)/'app.exe'; target.write_bytes(b'old')
+            destination=target.with_name('LisaMacroMagic.exe'); destination.write_bytes(b'existing')
+            stage=Path(tmp)/'.lisa-update-test'; stage.mkdir(); (stage/'ready.exe').write_bytes(b'new')
+            with self.assertRaises(FileExistsError): update_install.replace(stage,target)
+            self.assertEqual(target.read_bytes(),b'old')
+            self.assertEqual(destination.read_bytes(),b'existing')
+
+    def test_migration_stages_running_exe_without_modifying_it(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target=Path(tmp)/'LisaMacroMagic_v0.5.15.exe'; target.write_bytes(b'running')
+            stage=update_install.stage_name_migration(target)
+            self.assertEqual((stage/'ready.exe').read_bytes(),target.read_bytes())
