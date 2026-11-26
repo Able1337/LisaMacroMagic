@@ -1,3 +1,4 @@
+import threading
 import types
 import unittest
 from unittest.mock import patch
@@ -43,6 +44,80 @@ class PlayerTests(unittest.TestCase):
         player.run(countdown=0)
         self.assertEqual(self.devices[2].events,[('down','ctrl'),('up','ctrl')])
         self.assertIn('окно сменилось',self.finished[0])
+        self.assertIn('шаге 1/2',self.finished[0])
+
+    def test_transient_focus_change_waits_for_original_window(self):
+        player=self.player([{'type':'keys','value':'ctrl+s'}])
+        observed=[]
+        windows=iter([0,202,101])
+        def focus():
+            observed.append(next(windows,101))
+            return observed[-1],999999
+        def on_press():
+            if len(self.devices[2].events)==1: player.focus=focus
+            else: self.assertEqual(observed[-1],101)
+        self.devices[2].on_press=on_press
+        player.run(countdown=0)
+        self.assertEqual(observed[:3],[0,202,101])
+        self.assertEqual(self.finished,['Готово ♡'])
+
+    def test_repeat_uses_original_cursor_position_after_pause(self):
+        player=self.player([{'type':'click_here','button':'left'}, {'type':'delay','seconds':.05},
+                            {'type':'repeat'}, {'type':'repeat'}])
+        mouse=self.devices[3]; mouse.position=(17,29)
+        positions=[]
+        mouse.on_press=lambda:positions.append(mouse.position)
+        original_wait=player.wait
+        def wait(seconds):
+            if seconds==.05: mouse.position=(44,63)
+            original_wait(seconds)
+        player.wait=wait
+        player.run(countdown=0)
+        self.assertEqual(positions,[(17,29)]*3)
+        self.assertEqual(mouse.events,[('down','left'),('up','left')]*3)
+        self.assertEqual(self.finished,['Готово ♡'])
+
+    def test_second_player_sends_input_during_first_players_pause(self):
+        first=self.player([{'type':'keys','value':'z'}, {'type':'delay','seconds':10}, {'type':'repeat'}])
+        second_finished=[]
+        second=engine.Player([{'type':'keys','value':'s'}],lambda text:None,second_finished.append,
+                             self.devices,focus=first.focus,input_lock=first.input_lock)
+        paused,resume=threading.Event(),threading.Event()
+        original_wait=first.wait
+        def wait(seconds):
+            if seconds==10:
+                paused.set()
+                if not resume.wait(2): raise RuntimeError('Second player did not finish during the pause')
+            else: original_wait(seconds)
+        first.wait=wait
+        worker=threading.Thread(target=first.run,kwargs={'countdown':0})
+        worker.start()
+        try:
+            self.assertTrue(paused.wait(2))
+            second.run(countdown=0)
+            self.assertEqual(self.devices[2].events,[('down',90),('up',90),('down',83),('up',83)])
+        finally:
+            resume.set()
+            worker.join(timeout=2)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(self.devices[2].events[-2:],[('down',90),('up',90)])
+        self.assertEqual(self.finished,second_finished)
+        self.assertEqual(self.finished,['Готово ♡'])
+
+    def test_pause_during_drag_keeps_input_reserved_until_cleanup(self):
+        player=self.player([{'type':'mouse_down','button':'left','x':10,'y':20},
+                            {'type':'delay','seconds':.5}])
+        original_wait=player.wait
+        def wait(seconds):
+            if seconds==.5:
+                self.assertTrue(player.input_lock.locked())
+                player.stop()
+            original_wait(seconds)
+        player.wait=wait
+        player.run(countdown=0)
+        self.assertIn('Остановлено',self.finished[0])
+        self.assertEqual(self.devices[3].events,[('down','left'),('up','left')])
+        self.assertFalse(player.input_lock.locked())
 
     def test_mouse_release_after_error(self):
         player=self.player([{'type':'mouse_down','button':'left','x':10,'y':20}, {'type':'keys','value':'s'}])
@@ -73,17 +148,19 @@ class PlayerTests(unittest.TestCase):
         self.assertFalse(self.devices[2].events)
 
     def test_manual_click_waits_for_release_and_ignores_right(self):
-        player=self.player([{'type':'wait_click','seconds':.1}])
+        player=self.player([{'type':'wait_click','seconds':.1},{'type':'repeat'}])
         class Listener:
             def __init__(self,**kw): self.click=kw['on_click']; self.stopped=False
             def start(self):
                 self.click(0,0,'right',True); self.click(0,0,'right',False)
-                self.click(0,0,'left',True); self.click(0,0,'left',False)
+                self.click(25,34,'left',True); self.click(26,33,'left',False)
             def wait(self): pass
             def stop(self): self.stopped=True
             def join(self,timeout): pass
         self.devices[1].Listener=Listener
         player.run(countdown=0)
+        self.assertEqual(self.devices[3].position,(25,34))
+        self.assertEqual(self.devices[3].events,[('down','left'),('up','left')])
         self.assertEqual(self.finished,['Готово ♡'])
 
     def test_manual_click_timeout_cleans_listener(self):

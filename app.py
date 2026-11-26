@@ -1,4 +1,4 @@
-"""Lisa's Macro Magic 0.5.16 — user-configured local macro studio."""
+"""Lisa's Macro Magic — user-configured local macro studio."""
 import copy
 import ctypes
 import json
@@ -21,7 +21,8 @@ from engine import Player, Recorder, foreground
 from updates import UpdateCheck, RELEASE_URL
 import update_install
 
-VERSION = '0.5.16'
+VERSION = '0.5.17'
+WINDOW_TITLE = f"Lisa's Macro Magic 🎀 — v{VERSION}"
 STYLE = """
 QMainWindow, QDialog { background:#fff0f7; color:#684366; }
 QWidget { font-family:'Segoe UI'; font-size:14px; color:#684366; }
@@ -80,16 +81,16 @@ DARK_STYLE+='QToolTip,QMenu { background:#34283d; color:#f1ddeb; border:1px soli
 
 
 class Bridge(QObject):
-    status = Signal(str)
-    finished = Signal(str)
+    status = Signal(str, str)
+    finished = Signal(str, str)
     record_stop = Signal(str)
-    stop = Signal()
     action = Signal(str)
 
 
 class StepDialog(QDialog):
     TYPES = [('keys','⌨ Клавиша / сочетание'), ('delay','⏱ Пауза'), ('wait_click','♡ Ждать ручной ЛКМ'), ('wait_key','♡ Ждать нажатия клавиши'),
-             ('click','🖱 Клик по координатам'), ('move','↗ Перемещение мыши'), ('scroll','↕ Прокрутка'),
+             ('click','🖱 Клик по координатам'), ('click_here','🖱 Клик под курсором'),
+             ('repeat','↻ Повторить предыдущее действие'), ('move','↗ Перемещение мыши'), ('scroll','↕ Прокрутка'),
              ('key_down','Клавиша вниз (запись)'), ('key_up','Клавиша вверх (запись)'),
              ('mouse_down','Кнопка мыши вниз (запись)'), ('mouse_up','Кнопка мыши вверх (запись)')]
 
@@ -114,8 +115,8 @@ class StepDialog(QDialog):
                        ('Кнопка',self.button),('Прокрутка X',self.dx),('Прокрутка Y',self.dy)]
         for label, field in self.fields: form.addRow(label,field)
         layout.addLayout(form)
-        hint = QLabel('Клавиши: z, enter, ctrl+shift+s. space = пробел.\nБуквы обозначают клавиши S/Ы, Z/Я и т. п., а не ввод текста.\nОжидание клавиши или ЛКМ продолжается после нажатия и отпускания.\nНажатие проходит в браузер. Координаты — пиксели экрана.')
-        hint.setWordWrap(True); hint.setObjectName('muted'); layout.addWidget(hint)
+        self.hint = QLabel()
+        self.hint.setWordWrap(True); self.hint.setObjectName('muted'); layout.addWidget(self.hint)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(self.accept_checked); buttons.rejected.connect(self.reject); layout.addWidget(buttons)
         self.form = form
@@ -133,9 +134,14 @@ class StepDialog(QDialog):
         kind = self.kind.currentData()
         visible = {
             'keys':{0}, 'key_down':{0}, 'key_up':{0}, 'delay':{1}, 'wait_click':{1}, 'wait_key':{0,1},
-            'move':{2,3}, 'click':{2,3,4}, 'mouse_down':{2,3,4}, 'mouse_up':{2,3,4}, 'scroll':{5,6}}
+            'move':{2,3}, 'click':{2,3,4}, 'click_here':{4}, 'repeat':set(),
+            'mouse_down':{2,3,4}, 'mouse_up':{2,3,4}, 'scroll':{5,6}}
         for i, (_,field) in enumerate(self.fields):
             field.setVisible(i in visible[kind]); self.form.labelForField(field).setVisible(i in visible[kind])
+        self.hint.setText({
+            'repeat':'Повторяет последнее действие в этом сценарии, в том числе ручной ЛКМ. Можно добавить после паузы.',
+            'click_here':'Нажимает выбранную кнопку там, где находится курсор в момент выполнения.',
+        }.get(kind,'Клавиши: z, enter, ctrl+shift+s. space = пробел.\nБуквы обозначают клавиши S/Ы, Z/Я и т. п., а не ввод текста.\nОжидание клавиши или ЛКМ продолжается после нажатия и отпускания.\nНажатие проходит в браузер. Координаты — пиксели экрана.'))
 
     def wait_key_defaults(self):
         if self.kind.currentData()=='wait_key': self.value.setText('space'); self.seconds.setValue(120)
@@ -145,7 +151,7 @@ class StepDialog(QDialog):
         if kind in ('keys','key_down','key_up','wait_key'): result['value'] = self.value.text().strip().lower()
         if kind in ('delay','wait_click','wait_key'): result['seconds'] = self.seconds.value()
         if kind in ('click','move','mouse_down','mouse_up'): result.update(x=self.x.value(),y=self.y.value())
-        if kind in ('click','mouse_down','mouse_up'): result['button'] = self.button.currentText()
+        if kind in ('click','click_here','mouse_down','mouse_up'): result['button'] = self.button.currentText()
         if kind == 'scroll': result.update(dx=self.dx.value(),dy=self.dy.value())
         return model.validate_step(result)
 
@@ -158,7 +164,7 @@ class StepDialog(QDialog):
 class Window(QMainWindow):
     def __init__(self, native=True, persistence_path=None):
         super().__init__()
-        self.setWindowTitle("Lisa's Macro Magic 🎀 — v0.5.16")
+        self.setWindowTitle(WINDOW_TITLE)
         self.resize(1150,850); self.setMinimumSize(1050,760)
         self.setWindowIcon(icon())
         self.setStyleSheet(STYLE)
@@ -175,16 +181,19 @@ class Window(QMainWindow):
                 self.scenarios=project['scenarios']; self.settings=project['settings']
             except (OSError,ValueError,TypeError,RecursionError) as exc:
                 self.autosave_blocked=True; self.load_error=str(exc)
-        self.player = None; self.worker = None; self.recorder = None; self.pending_record = 0
+        self.playbacks = {}
+        self.input_lock = threading.Lock()
+        self.playback_lock = threading.Lock()
+        self.stopping_playback = False
+        self.recorder = None; self.pending_record = 0
         self.record_target = None; self.close_pending = False; self.hotkeys = None; self.emergency = None
         self.tray=None; self.exit_requested=False
         self.input_monitor=None
         self.date_dialog=None; self.secret_clicks=0; self.secret_timer=QElapsedTimer()
         self.bridge = Bridge()
-        self.bridge.status.connect(self.set_status)
+        self.bridge.status.connect(self.play_status)
         self.bridge.finished.connect(self.play_finished)
         self.bridge.record_stop.connect(self.finish_record)
-        self.bridge.stop.connect(self.stop_all)
         self.bridge.action.connect(self.handle_action)
         self.auto_timer=QTimer(self); self.auto_timer.setSingleShot(True); self.auto_timer.setInterval(700)
         self.auto_timer.timeout.connect(self.autosave)
@@ -196,7 +205,7 @@ class Window(QMainWindow):
         self.affirmation=AffirmationCard(); header.addWidget(self.affirmation); outer.addLayout(header)
         subtitle_row=QHBoxLayout()
         subtitle = QLabel('Твои сценарии. Твои бинды. Немножко магии ♡'); subtitle.setObjectName('muted'); subtitle_row.addWidget(subtitle); subtitle_row.addStretch()
-        version = QLabel('PINK EDITION  /  0.5.16'); version.setObjectName('muted'); subtitle_row.addWidget(version); outer.addLayout(subtitle_row)
+        version = QLabel(f'PINK EDITION  /  {VERSION}'); version.setObjectName('muted'); subtitle_row.addWidget(version); outer.addLayout(subtitle_row)
         toolbar = QHBoxLayout()
         self.open_btn = self.button('Открыть JSON',self.open_file,toolbar)
         self.save_btn = self.button('Сохранить',self.save_file,toolbar)
@@ -317,7 +326,7 @@ class Window(QMainWindow):
         except (OSError,ValueError) as exc:
             self.set_status('Не сохранено автоматически: '+str(exc)); return False
         self.dirty=False
-        self.setWindowTitle("Lisa's Macro Magic 🎀 — v0.5.16")
+        self.setWindowTitle(WINDOW_TITLE)
         return True
 
     def button(self,text,slot,layout,style=None):
@@ -417,7 +426,7 @@ class Window(QMainWindow):
     def update_tray(self):
         if self.tray is None: return
         state=('Идёт запись' if self.recorder else 'Подготовка записи' if self.pending_record else
-               'Выполняется макрос' if self.player else 'Бинды включены' if self.armed.isChecked() else 'Бинды выключены')
+               f'В работе: {len(self.playbacks)}' if self.playbacks else 'Бинды включены' if self.armed.isChecked() else 'Бинды выключены')
         self.tray.setToolTip(f'Lisa’s Macro Magic 🎀\n{state}')
 
     def tray_activated(self,reason):
@@ -439,7 +448,7 @@ class Window(QMainWindow):
     def selected(self): return self.scenarios[self.current] if self.current is not None else None
     def changed(self):
         self.dirty=True
-        self.setWindowTitle("Lisa's Macro Magic 🎀 — v0.5.16 *")
+        self.setWindowTitle(f'{WINDOW_TITLE} *')
         self.auto_timer.start()
 
     def details_edited(self): self.details_dirty=True; self.changed()
@@ -503,24 +512,35 @@ class Window(QMainWindow):
         if not self.selected(): return
         dialog=StepDialog(parent=self)
         if dialog.exec():
-            steps=self.selected()['steps']; row=self.steps.currentRow()+1 if self.steps.currentRow()>=0 else len(steps)
-            steps.insert(row,dialog.result_step()); self.changed(); self.refresh_steps(row)
+            steps=self.selected()['steps'].copy(); row=self.steps.currentRow()+1 if self.steps.currentRow()>=0 else len(steps)
+            steps.insert(row,dialog.result_step()); self.replace_steps(steps,row)
 
     def edit_step(self,*args):
         row=self.steps.currentRow()
         if not self.selected() or row<0: return
         dialog=StepDialog(self.selected()['steps'][row],self)
-        if dialog.exec(): self.selected()['steps'][row]=dialog.result_step(); self.changed(); self.refresh_steps(row)
+        if dialog.exec():
+            steps=self.selected()['steps'].copy()
+            steps[row]=dialog.result_step(); self.replace_steps(steps,row)
 
     def remove_step(self):
         row=self.steps.currentRow()
-        if row>=0 and self.selected(): self.selected()['steps'].pop(row); self.changed(); self.refresh_steps(row)
+        if row>=0 and self.selected():
+            steps=self.selected()['steps'].copy()
+            steps.pop(row); self.replace_steps(steps,row)
 
     def move_step(self,delta):
         row=self.steps.currentRow(); item=self.selected()
         if item and 0<=row+delta<len(item['steps']) and row>=0:
-            item['steps'][row],item['steps'][row+delta]=item['steps'][row+delta],item['steps'][row]
-            self.changed(); self.refresh_steps(row+delta)
+            steps=item['steps'].copy()
+            steps[row],steps[row+delta]=steps[row+delta],steps[row]
+            self.replace_steps(steps,row+delta)
+
+    def replace_steps(self,steps,row):
+        try: model.validate_repeats(steps)
+        except ValueError as exc: return self.error(exc)
+        self.selected()['steps']=steps
+        self.changed(); self.refresh_steps(row)
 
     def configure_hotkeys(self,*args):
         if not self.hotkeys: return
@@ -531,20 +551,21 @@ class Window(QMainWindow):
         self.set_status(('Бинды включены ♡' if self.armed.isChecked() else 'Бинды выключены.')+f" {self.settings['control_bind']} — переключить / остановить")
 
     def hotkey_received(self,action):
-        if action=='control':
-            action='stop' if self.busy() else 'toggle'
-            if self.player: self.player.stop()
+        if action=='control' and self.request_playback_stop():
+            action='stop'
         self.bridge.action.emit(action)
 
     def handle_action(self,action):
-        if action=='stop': self.stop_all()
-        elif action=='toggle':
-            if not self.busy(): self.armed.setChecked(not self.armed.isChecked())
-        elif self.armed.isChecked() and not self.busy():
+        if action=='stop':
+            if self.stopping_playback: self.set_status('Останавливаю сценарии…')
+        elif action=='control':
+            if self.busy(): self.stop_all()
+            else: self.armed.setChecked(not self.armed.isChecked())
+        elif self.armed.isChecked():
             item=next((s for s in self.scenarios if s['id']==action),None)
             if item: self.run_scenario(item,triggered=True)
 
-    def busy(self): return self.player is not None or self.recorder is not None or self.pending_record>0
+    def busy(self): return bool(self.playbacks or self.recorder or self.pending_record)
     def begin_emergency(self):
         if self.hotkeys and (not self.hotkeys.listener or not self.hotkeys.listener.is_alive()):
             raise RuntimeError('Управляющая клавиша недоступна. Перезапусти приложение.')
@@ -559,27 +580,52 @@ class Window(QMainWindow):
         if self.apply_details() and self.selected(): self.run_scenario(self.selected())
 
     def run_scenario(self,item,triggered=False):
-        if self.busy(): return
+        scenario_id=item['id']
+        if self.recorder or self.pending_record or self.stopping_playback or scenario_id in self.playbacks: return
         if self.details_dirty:
             self.set_status('Сначала примени изменения названия и бинда.'); return
         try:
             model.validate(self.data())
             if not item['steps']: raise ValueError('Добавь хотя бы один шаг.')
-        except ValueError as exc: return self.error(exc)
-        try: self.begin_emergency()
-        except Exception as exc: return self.error(exc)
-        self.set_busy(True)
-        self.player=Player(copy.deepcopy(item['steps']),self.bridge.status.emit,self.bridge.finished.emit,
+            self.begin_emergency()
+        except (ValueError,RuntimeError) as exc:
+            if triggered: self.set_status(f"{item['name']} · {exc}")
+            else: self.error(exc)
+            return
+        player=Player(copy.deepcopy(item['steps']),
+            lambda text:self.bridge.status.emit(scenario_id,text),
+            lambda text:self.bridge.finished.emit(scenario_id,text),
             stop_label=self.settings['control_bind'],trigger_modifiers=model.hotkey(item['bind'])[0] if triggered and item['bind'] else 0,
-            allowed_windows=self.allowed_test_windows())
-        self.update_tray()
+            allowed_windows=self.allowed_test_windows(),input_lock=self.input_lock)
+        with self.playback_lock:
+            if self.stopping_playback: return
+            self.playbacks[scenario_id]=(item['name'],player)
+        self.set_busy(True)
+        self.play_status(scenario_id,'Запуск…')
         delay=self.settings['start_delay']
-        self.worker=threading.Thread(target=lambda:self.player.run(countdown=delay),daemon=False); self.worker.start()
+        worker=threading.Thread(target=lambda:player.run(countdown=delay),daemon=False)
+        try: worker.start()
+        except RuntimeError as exc: self.play_finished(scenario_id,str(exc))
 
-    def play_finished(self,text):
-        if self.worker: self.worker.join(timeout=1)
-        self.player=None; self.worker=None; self.end_emergency(); self.set_busy(False); self.set_status(text)
-        if self.close_pending: self.close_pending=False; self.close()
+    def play_status(self,scenario_id,text):
+        if scenario_id in self.playbacks and not self.stopping_playback:
+            name,_=self.playbacks[scenario_id]
+            self.show_playback_status(name,text)
+
+    def show_playback_status(self,name,text):
+        count=f' · В работе: {len(self.playbacks)}' if self.playbacks else ''
+        self.set_status(f'{name} · {text}{count}')
+
+    def play_finished(self,scenario_id,text):
+        with self.playback_lock:
+            playback=self.playbacks.pop(scenario_id,None)
+            if not self.playbacks: self.stopping_playback=False
+        if playback is None: return
+        if not self.playbacks:
+            self.end_emergency(); self.set_busy(False)
+        self.show_playback_status(playback[0],text)
+        if self.close_pending and not self.playbacks:
+            self.close_pending=False; self.close()
 
     def start_record(self):
         if self.busy() or not self.selected() or not self.apply_details(): return
@@ -626,8 +672,16 @@ class Window(QMainWindow):
                 else: self.changed(); self.refresh_steps()
         self.end_emergency(); self.set_busy(False); self.set_status(message)
 
+    def request_playback_stop(self):
+        with self.playback_lock:
+            if not self.playbacks: return False
+            if not self.stopping_playback:
+                self.stopping_playback=True
+                for _,player in self.playbacks.values(): player.stop()
+            return True
+
     def stop_all(self):
-        if self.player: self.player.stop(); self.set_status('Останавливаю…')
+        if self.request_playback_stop(): self.set_status('Останавливаю сценарии…')
         elif self.recorder or self.pending_record: self.finish_record('Запись остановлена. Действия добавлены в сценарий.')
 
     def confirm_discard(self):
@@ -665,7 +719,7 @@ class Window(QMainWindow):
             model.save(path,self.scenarios,self.settings)
         except (OSError,ValueError) as exc: self.error(exc); return False
         if not save_as: self.autosave_blocked=False; self.dirty=False
-        self.setWindowTitle("Lisa's Macro Magic 🎀 — v0.5.16"); self.set_status(f'Сохранено ♡ {path}'); return True
+        self.setWindowTitle(WINDOW_TITLE); self.set_status(f'Сохранено ♡ {path}'); return True
 
     def copy_diagnostics(self):
         import platform,struct,tempfile
@@ -686,8 +740,9 @@ class Window(QMainWindow):
             'Крестик прячет окно в трей. Чтобы завершить приложение, выбери «Выйти» в меню значка лисички.\n\n'
             '«Ждать ручной ЛКМ» продолжает после твоего клика и отпускания кнопки.\n'
             'Координаты кликов можно получить записью движений и затем отредактировать.\n'
-            'Смена активного окна останавливает запись и воспроизведение.\n'
-            'Один запуск = один проход, одновременно работает один сценарий.\n'
+            '«Клик под курсором» нажимает без заданных координат. «Повторить предыдущее действие» работает и после паузы.\n'
+            'Пока сценарий ждёт, другой сценарий можно запустить его биндом. «Стоп» останавливает все запуски.\n'
+            'Если исходное окно не вернётся за 0,3 с, сценарий остановится. При записи остановка происходит сразу.\n'
             'Roadcons настраивается тобой: программа не распознаёт объекты карты.\n'
             'Она не проверяет результат команды в браузере — сначала проверяй сценарий на безопасном примере.')
 
@@ -702,8 +757,8 @@ class Window(QMainWindow):
         if self.downloading:
             self.set_status('Подожди, пока завершится загрузка обновления.')
             self.exit_requested=False; event.ignore(); return
-        if self.player:
-            self.close_pending=True; self.player.stop(); event.ignore(); return
+        if self.playbacks:
+            self.close_pending=True; self.stop_all(); event.ignore(); return
         if self.recorder or self.pending_record: self.finish_record('Запись завершена.')
         self.auto_timer.stop()
         if self.dirty: self.autosave()

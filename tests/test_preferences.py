@@ -21,7 +21,7 @@ class PreferencesTests(unittest.TestCase):
 
     def tearDown(self):
         for w in self.windows:
-            w.player=None; w.worker=None; w.dirty=False; w.close()
+            w.playbacks.clear(); w.dirty=False; w.close()
         self.temp.cleanup()
 
     def test_first_start_creates_file_and_zero_delay(self):
@@ -47,9 +47,10 @@ class PreferencesTests(unittest.TestCase):
         w.bind.setText('F11'); self.assertTrue(w.apply_details())
 
     def test_control_toggles_when_idle_and_stops_busy_without_toggling(self):
-        w=self.window(); w.handle_action('toggle'); self.assertTrue(w.armed.isChecked())
-        w.player=MagicMock(); w.hotkey_received('control'); self.application.processEvents()
-        w.player.stop.assert_called(); self.assertTrue(w.armed.isChecked()); w.player=None
+        w=self.window(); w.handle_action('control'); self.assertTrue(w.armed.isChecked())
+        player=MagicMock(); w.playbacks[w.selected()['id']]=(w.selected()['name'],player)
+        w.hotkey_received('control'); self.application.processEvents()
+        player.stop.assert_called_once(); self.assertTrue(w.armed.isChecked())
 
     def test_bad_file_is_preserved(self):
         self.path.parent.mkdir(parents=True); self.path.write_text('{bad',encoding='utf-8')
@@ -84,7 +85,7 @@ class PreferencesTests(unittest.TestCase):
             w.run_scenario(w.selected())
             thread.call_args.kwargs['target']()
             player.return_value.run.assert_called_once_with(countdown=6)
-            w.play_finished('test')
+            w.play_finished(w.selected()['id'],'test')
 
     def test_animation_has_frames(self):
         w=self.window(); self.assertTrue(w.fox.movie.isValid()); self.assertGreater(w.fox.movie.frameCount(),1)

@@ -4,7 +4,9 @@ from ctypes import wintypes
 import threading
 import time
 import os
-from model import combo
+from model import combo, describe, WAIT_STEPS, REPEAT_SOURCES, KEEP_REPEAT_SOURCE, REPEAT_ERROR
+
+FOCUS_GRACE_SECONDS = 0.3
 
 
 def foreground():
@@ -25,7 +27,8 @@ def key_is_down(vk):
 
 
 class Player:
-    def __init__(self, steps, status, finished, backend=None, focus=foreground, stop_label='F12', trigger_modifiers=0,allowed_windows=()):
+    def __init__(self, steps, status, finished, backend=None, focus=foreground, stop_label='F12',
+                 trigger_modifiers=0, allowed_windows=(), input_lock=None):
         self.steps, self.status, self.finished = steps, status, finished
         self.cancel = threading.Event()
         self.focus = focus
@@ -35,13 +38,26 @@ class Player:
         self.stop_label=stop_label
         self.trigger_modifiers=trigger_modifiers
         self.allowed_windows=frozenset(allowed_windows)
+        self.input_lock = input_lock if input_lock is not None else threading.Lock()
 
     def stop(self): self.cancel.set()
 
+    def has_focus(self):
+        return self.target is None or self.focus()[0] == self.target
+
     def check(self):
         if self.cancel.is_set(): raise Cancelled()
-        if self.target is not None and self.focus()[0] != self.target:
-            raise RuntimeError('Активное окно сменилось. Запуск остановлен; выбери нужное окно и запусти заново.')
+        if self.has_focus(): return
+        deadline = time.monotonic() + FOCUS_GRACE_SECONDS
+        while not self.has_focus():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise RuntimeError('Активное окно сменилось. Запуск остановлен; выбери нужное окно и запусти заново.')
+            if self.cancel.wait(min(0.02, remaining)): raise Cancelled()
+
+    def acquire_input(self):
+        while not self.input_lock.acquire(timeout=0.02):
+            self.check()
 
     def wait(self, seconds):
         end = time.monotonic() + seconds
@@ -62,7 +78,7 @@ class Player:
 
     def key_down(self, value):
         key = self.resolve(value)
-        self.keys.append(key)
+        if key not in self.keys: self.keys.append(key)
         self.backend[2].press(key)
 
     def key_up(self, value):
@@ -70,15 +86,15 @@ class Player:
         self.backend[2].release(key)
         if key in self.keys: self.keys.remove(key)
 
-    def mouse_down(self, step):
+    def mouse_down(self, step, move=True):
         button = getattr(self.backend[1].Button, step['button'])
-        self.backend[3].position = (step['x'], step['y'])
-        self.buttons.append(button)
+        if move: self.backend[3].position = (step['x'], step['y'])
+        if button not in self.buttons: self.buttons.append(button)
         self.backend[3].press(button)
 
-    def mouse_up(self, step):
+    def mouse_up(self, step, move=True):
         button = getattr(self.backend[1].Button, step['button'])
-        self.backend[3].position = (step['x'], step['y'])
+        if move: self.backend[3].position = (step['x'], step['y'])
         self.backend[3].release(button)
         if button in self.buttons: self.buttons.remove(button)
 
@@ -86,11 +102,19 @@ class Player:
         # Complete on release, so the physical button is up before the next key.
         mouse = self.backend[1]
         event = threading.Event()
-        pressed = threading.Event()
+        position = None
+        completed = None
         def click(x, y, button, down):
-            if button == mouse.Button.left:
-                if down: pressed.set()
-                elif pressed.is_set(): event.set()
+            nonlocal position, completed
+            if button != mouse.Button.left or event.is_set(): return
+            focused = self.has_focus()
+            if down:
+                position = (x, y) if focused else None
+            else:
+                if position is not None and focused:
+                    completed = {'type':'click', 'button':'left', 'x':position[0], 'y':position[1]}
+                    event.set()
+                position = None
         def physical(msg, data):
             return not (data.flags & 1)  # LLMHF_INJECTED
         listener = mouse.Listener(on_click=click, suppress=False, win32_event_filter=physical)
@@ -104,6 +128,7 @@ class Player:
                 event.wait(0.02)
             self.check()
             self.wait(0.12)
+            return completed
         finally:
             listener.stop()
             listener.join(timeout=1)
@@ -122,11 +147,12 @@ class Player:
             if expected_vk in generic: return actual in generic[expected_vk]
             return actual==expected_vk if actual is not None and expected_vk is not None else key==expected
         def down(key):
-            if matches(key) and ready.is_set(): pressed.set()
+            if matches(key) and ready.is_set() and self.has_focus(): pressed.set()
         def up(key):
             if matches(key):
                 if not ready.is_set(): ready.set(); return
-                if pressed.is_set(): event.set()
+                if pressed.is_set() and self.has_focus(): event.set()
+                pressed.clear()
         listener=keyboard.Listener(on_press=down,on_release=up,suppress=False,
             win32_event_filter=lambda msg,data:not(data.flags & 0x10))
         listener.start()
@@ -144,7 +170,7 @@ class Player:
     def execute(self, step):
         kind = step['type']
         if kind == 'delay': self.wait(step['seconds'])
-        elif kind == 'wait_click': self.wait_click(step['seconds'])
+        elif kind == 'wait_click': return self.wait_click(step['seconds'])
         elif kind == 'wait_key': self.wait_key(step['value'],step['seconds'])
         elif kind == 'keys':
             parts = combo(step['value'])
@@ -158,14 +184,22 @@ class Player:
         elif kind == 'move': self.backend[3].position = (step['x'], step['y'])
         elif kind == 'mouse_down': self.mouse_down(step)
         elif kind == 'mouse_up': self.mouse_up(step)
-        elif kind == 'click':
-            self.mouse_down(step)
+        elif kind in ('click', 'click_here'):
+            move = kind == 'click'
+            if not move:
+                x, y = self.backend[3].position
+                step = {'type':'click', 'button':step['button'], 'x':x, 'y':y}
+            self.mouse_down(step, move=move)
             self.wait(0.04)
-            self.mouse_up(step)
+            self.mouse_up(step, move=move)
+            return step
         elif kind == 'scroll': self.backend[3].scroll(step['dx'], step['dy'])
 
     def run(self, countdown=3):
         message = 'Готово ♡'
+        step_number = 0
+        owns_input = False
+        previous = None
         try:
             if self.backend is None:
                 from pynput import keyboard, mouse
@@ -183,16 +217,29 @@ class Player:
             if not hwnd or (pid == os.getpid() and hwnd not in self.allowed_windows):
                 raise RuntimeError('Выбрано окно редактора. При задержке 0 запускай биндом из браузера; для кнопки задай задержку и переключись в целевое окно.')
             self.target = hwnd
-            for i, step in enumerate(self.steps):
+            for step_number, step in enumerate(self.steps, 1):
                 self.check()
-                action=f"жду клавишу {step['value']} ♡" if step['type']=='wait_key' else ('жду ручной клик ♡' if step['type']=='wait_click' else step['type'])
-                self.status(f"Шаг {i + 1}/{len(self.steps)}: {action} · {self.stop_label} — стоп")
-                self.execute(step)
+                kind = step['type']
+                if kind == 'repeat' and previous is None: raise ValueError(REPEAT_ERROR)
+                action = previous if kind == 'repeat' else step
+                # Let other players send input during a wait, unless a drag or key hold is in progress.
+                if kind in WAIT_STEPS and owns_input and not (self.keys or self.buttons):
+                    self.input_lock.release()
+                    owns_input = False
+                self.status(f"Шаг {step_number}/{len(self.steps)} · {describe(step)} · {self.stop_label} — стоп")
+                if kind not in WAIT_STEPS and not owns_input:
+                    self.acquire_input()
+                    owns_input = True
+                self.check()
+                performed = self.execute(action)
+                if kind not in KEEP_REPEAT_SOURCE:
+                    previous = (performed or step) if kind in REPEAT_SOURCES else None
                 self.wait(0.01)
         except Cancelled:
             message = 'Остановлено. Все нажатые приложением клавиши отпущены.'
         except Exception as exc:
-            message = 'Ошибка: ' + str(exc)
+            where = f' на шаге {step_number}/{len(self.steps)}' if step_number else ''
+            message = f'Ошибка{where}: {exc}'
         finally:
             if self.backend:
                 for key in reversed(self.keys):
@@ -201,6 +248,7 @@ class Player:
                 for button in reversed(self.buttons):
                     try: self.backend[3].release(button)
                     except Exception: pass
+            if owns_input: self.input_lock.release()
             self.finished(message)
 
 

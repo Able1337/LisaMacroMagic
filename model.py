@@ -6,7 +6,11 @@ import uuid
 DEFAULT_SETTINGS = {'start_delay': 0, 'record_delay': 3, 'control_bind': 'F12', 'theme': 'pink'}
 
 KINDS = {'keys', 'delay', 'wait_click', 'wait_key', 'click', 'move', 'scroll',
-         'key_down', 'key_up', 'mouse_down', 'mouse_up'}
+         'key_down', 'key_up', 'mouse_down', 'mouse_up', 'click_here', 'repeat'}
+WAIT_STEPS = {'delay', 'wait_click', 'wait_key'}
+REPEAT_SOURCES = {'keys', 'click', 'click_here', 'wait_click', 'move', 'scroll'}
+KEEP_REPEAT_SOURCE = {'delay', 'wait_key', 'repeat'}
+REPEAT_ERROR = 'Перед повтором добавь клик, клавишу / сочетание, перемещение или прокрутку.'
 SPECIAL = {'enter', 'tab', 'space', 'esc', 'backspace', 'delete', 'insert',
            'home', 'end', 'page_up', 'page_down', 'up', 'down', 'left', 'right',
            'ctrl', 'shift', 'alt', 'ctrl_l', 'ctrl_r', 'shift_l', 'shift_r', 'alt_l', 'alt_r'}
@@ -58,18 +62,28 @@ def validate_step(step):
     if kind == 'keys': combo(step.get('value', ''))
     if kind in ('key_down', 'key_up', 'wait_key') and not key_valid(step.get('value')):
         raise ValueError('Укажи одну клавишу: space, enter, z, F1–F12 и т. п.')
-    if kind in ('delay', 'wait_click', 'wait_key'): number(step.get('seconds'), 0.01, 600)
+    if kind in WAIT_STEPS: number(step.get('seconds'), 0.01, 600)
     if kind in ('click', 'move', 'mouse_down', 'mouse_up'):
         for axis in ('x', 'y'):
             number(step.get(axis), -100000, 100000)
             if type(step[axis]) is not int: raise ValueError('Координаты должны быть целыми.')
-    if kind in ('click', 'mouse_down', 'mouse_up') and step.get('button') not in ('left', 'right', 'middle'):
+    if kind in ('click', 'click_here', 'mouse_down', 'mouse_up') and step.get('button') not in ('left', 'right', 'middle'):
         raise ValueError('Неизвестная кнопка мыши.')
     if kind == 'scroll':
         for axis in ('dx', 'dy'):
             number(step.get(axis), -100, 100)
             if type(step[axis]) is not int: raise ValueError('Прокрутка должна быть целой.')
     return step
+
+
+def validate_repeats(steps):
+    has_source = False
+    for step in steps:
+        kind = step['type']
+        if kind == 'repeat' and not has_source:
+            raise ValueError(REPEAT_ERROR)
+        if kind not in KEEP_REPEAT_SOURCE:
+            has_source = kind in REPEAT_SOURCES
 
 
 def scenario(name='Новая магия', bind=''):
@@ -98,7 +112,9 @@ def validate(data):
         seconds = 0
         for step in item['steps']:
             validate_step(step)
-            seconds += step.get('seconds', 0) if step['type'] in ('delay', 'wait_click','wait_key') else 0
+            if step['type'] in WAIT_STEPS:
+                seconds += step['seconds']
+        validate_repeats(item['steps'])
         if seconds > 3600: raise ValueError('Сумма ожиданий сценария — не более часа.')
         total += len(item['steps'])
     if total > 20000: raise ValueError('Не более 20000 шагов в файле.')
@@ -153,6 +169,8 @@ def describe(step):
     if kind == 'delay': return f"⏱  Пауза {step['seconds']:g} с"
     if kind == 'wait_click': return f"♡  Ждать ручной ЛКМ (до {step['seconds']:g} с)"
     if kind == 'wait_key': return f"♡  Ждать {step['value']} (до {step['seconds']:g} с)"
+    if kind == 'click_here': return f"🖱  Клик под курсором ({step['button']})"
+    if kind == 'repeat': return '↻  Повторить предыдущее действие'
     if kind in ('key_down', 'key_up'): return f"⌨  {step['value']} {'↓' if kind == 'key_down' else '↑'}"
     if kind == 'scroll': return f"↕  Прокрутка {step['dx']}, {step['dy']}"
     return f"{'↗' if kind == 'move' else '🖱'}  {kind}: {step.get('button', '')} ({step['x']}, {step['y']})"

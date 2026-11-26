@@ -24,7 +24,7 @@ class TrayTests(unittest.TestCase):
     def tearDown(self):
         self.window.tray=None
         self.window.hotkeys=None
-        self.window.player=None
+        self.window.playbacks.clear()
         self.window.exit_requested=False
         self.window.dirty=False
         self.window.close()
@@ -33,24 +33,27 @@ class TrayTests(unittest.TestCase):
     def test_close_hides_window_but_leaves_macro_and_hotkeys_running(self):
         w=self.window
         w.show(); w.armed.setChecked(True)
-        w.player=Mock()
+        player=Mock(); w.playbacks['first']=('Первый',player)
         w.close()
         self.assertFalse(w.isVisible())
         self.assertTrue(w.armed.isChecked())
         self.assertTrue(w.affirmation.timer.isActive())
-        w.player.stop.assert_not_called()
+        player.stop.assert_not_called()
         w.hotkeys.clear.assert_not_called()
         w.restore_from_tray()
         self.assertTrue(w.isVisible())
 
-    def test_exit_stops_macro_then_removes_tray_and_hotkeys(self):
-        w=self.window; player=Mock(); w.player=player
+    def test_exit_waits_for_all_macros_then_removes_tray_and_hotkeys(self):
+        w=self.window; first,second=Mock(),Mock()
+        w.playbacks={'first':('Первый',first),'second':('Второй',second)}
         with patch.object(app.QTimer,'singleShot') as quit_later:
             w.exit_from_tray()
-            player.stop.assert_called_once()
+            first.stop.assert_called_once()
+            second.stop.assert_called_once()
+            w.play_finished('first','Готово')
             w.tray.hide.assert_not_called()
             quit_later.assert_not_called()
-            w.play_finished('Готово')
+            w.play_finished('second','Готово')
             w.tray.hide.assert_called_once()
             w.hotkeys.clear.assert_called_once()
             quit_later.assert_called_once_with(0,self.application.quit)

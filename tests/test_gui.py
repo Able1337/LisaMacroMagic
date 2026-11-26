@@ -40,6 +40,28 @@ class GuiTests(unittest.TestCase):
         self.assertEqual(dialog.result_step(),{'type':'wait_click','seconds':120})
         dialog.close()
 
+    def test_cursor_click_and_repeat_are_editable_and_saved(self):
+        w=self.window
+        click={'type':'click_here','button':'right'}
+        repeat={'type':'repeat'}
+        for step in (click,repeat):
+            dialog=app.StepDialog(step)
+            self.assertEqual(dialog.result_step(),step)
+            self.assertTrue(dialog.x.isHidden())
+            self.assertEqual(dialog.button.isHidden(),step==repeat)
+            dialog.close()
+            with patch('app.StepDialog') as editor:
+                editor.return_value.exec.return_value=True
+                editor.return_value.result_step.return_value=step
+                w.add_step()
+        self.assertTrue(w.autosave())
+        self.assertEqual(app.model.load(self.path)[0]['steps'][-2:],[click,repeat])
+        w.steps.setCurrentRow(w.steps.count()-1)
+        with patch.object(w,'error') as error:
+            w.move_step(-w.steps.currentRow())
+            error.assert_called_once()
+        self.assertEqual(w.selected()['steps'][-2:],[click,repeat])
+
     def test_time_hint_only_in_deck_and_footer_tooltip(self):
         from affirmations import TIME_HINT,PHRASES
         self.assertEqual(self.window.love_note.toolTip(),TIME_HINT)
@@ -58,6 +80,30 @@ class GuiTests(unittest.TestCase):
     def test_busy_disables_editor(self):
         w=self.window; w.set_busy(True)
         self.assertFalse(w.run_btn.isEnabled()); self.assertFalse(w.open_btn.isEnabled()); self.assertTrue(w.stop_btn.isEnabled())
+
+    def test_different_hotkeys_start_parallel_runs_and_control_stops_all(self):
+        w=self.window
+        first=w.selected()
+        second=app.model.scenario('Второй','F7')
+        second['steps']=[{'type':'keys','value':'s'}]
+        w.scenarios.append(second)
+        w.armed.setChecked(True)
+        with patch('app.Player') as player, patch('app.threading.Thread'):
+            w.hotkey_received(first['id'])
+            w.hotkey_received(second['id'])
+            w.hotkey_received(first['id'])
+            self.assertEqual(player.call_count,2)
+        self.assertEqual(set(w.playbacks),{first['id'],second['id']})
+        self.assertIn('В работе: 2',w.status.text())
+        w.hotkey_received('control')
+        self.assertEqual(player.return_value.stop.call_count,2)
+        w.play_finished(first['id'],'Остановлено')
+        self.assertTrue(w.busy())
+        self.assertFalse(w.run_btn.isEnabled())
+        w.play_finished(second['id'],'Остановлено')
+        self.assertFalse(w.busy())
+        self.assertTrue(w.run_btn.isEnabled())
+        self.assertTrue(w.armed.isChecked())
 
     def test_stop_during_record_countdown(self):
         w=self.window; w.pending_record=3; w.set_busy(True); w.stop_all()
