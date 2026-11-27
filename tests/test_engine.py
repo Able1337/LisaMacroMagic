@@ -22,14 +22,49 @@ def backend():
 
 
 class PlayerTests(unittest.TestCase):
-    def player(self,steps):
+    def player(self,steps,scenarios=None):
         self.messages=[]; self.finished=[]; self.devices=backend()
-        return engine.Player(steps,self.messages.append,self.finished.append,self.devices,focus=lambda:(101,999999))
+        return engine.Player(steps,self.messages.append,self.finished.append,self.devices,
+                             focus=lambda:(101,999999),scenarios=scenarios)
 
     def test_shortcut_order_and_release(self):
         player=self.player([{'type':'keys','value':'ctrl+shift+s'}]); player.run(countdown=0)
         self.assertEqual(self.devices[2].events,[('down','ctrl'),('down','shift'),('down',83),('up',83),('up','shift'),('up','ctrl')])
         self.assertEqual(self.finished,['Готово ♡'])
+
+    def test_nested_scenarios_return_to_the_next_step(self):
+        scenarios={
+            'child':{'name':'Заливка','steps':[{'type':'keys','value':'s'},
+                                              {'type':'call','scenario_id':'nested'},
+                                              {'type':'keys','value':'enter'}]},
+            'nested':{'name':'Подготовка','steps':[{'type':'keys','value':'x'},{'type':'repeat'}]},
+        }
+        steps=[{'type':'keys','value':'z'},{'type':'call','scenario_id':'child'},{'type':'keys','value':'a'}]
+        player=self.player(steps,scenarios)
+        player.run(countdown=0)
+        pressed=[key for event,key in self.devices[2].events if event=='down']
+        self.assertEqual(pressed,[90,83,88,88,'enter',65])
+        self.assertTrue(any('2/3 → «Заливка» 2/3 → «Подготовка» 1/2' in message for message in self.messages))
+        self.assertEqual(self.finished,['Готово ♡'])
+
+    def test_call_releases_child_input_before_continuing(self):
+        scenarios={'child':{'name':'Другой','steps':[{'type':'key_down','value':'shift'}]}}
+        steps=[{'type':'key_down','value':'ctrl'},{'type':'call','scenario_id':'child'},
+               {'type':'key_up','value':'ctrl'},{'type':'keys','value':'z'}]
+        player=self.player(steps,scenarios)
+        player.run(countdown=0)
+        self.assertEqual(self.devices[2].events,[('down','ctrl'),('down','shift'),('up','shift'),
+                                                 ('up','ctrl'),('down',90),('up',90)])
+        self.assertEqual(self.finished,['Готово ♡'])
+
+    def test_stop_inside_a_call_stops_the_parent_and_releases_input(self):
+        scenarios={'child':{'name':'Другой','steps':[{'type':'key_down','value':'shift'}]}}
+        player=self.player([{'type':'call','scenario_id':'child'},{'type':'keys','value':'z'}],scenarios)
+        self.devices[2].on_press=player.stop
+        player.run(countdown=0)
+        self.assertEqual(self.devices[2].events,[('down','shift'),('up','shift')])
+        self.assertIn('Остановлено',self.finished[0])
+        self.assertFalse(player.input_lock.locked())
 
     def test_emergency_stop_releases_held_key(self):
         player=self.player([{'type':'keys','value':'ctrl+s'},{'type':'keys','value':'z'}])

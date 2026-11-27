@@ -44,3 +44,29 @@ class ModelTests(unittest.TestCase):
     def test_limits(self):
         data=self.data(); data['scenarios'][0]['steps']=[{'type':'delay','seconds':600}]*7
         with self.assertRaises(ValueError): model.validate(data)
+
+    def test_calls_reject_missing_targets_and_cycles(self):
+        data=self.data()
+        main=data['scenarios'][0]
+        child=model.scenario('Подпрограмма')
+        data['scenarios'].append(child)
+        for target in ('missing',main['id'],child['id']):
+            with self.subTest(target=target):
+                main['steps']=[{'type':'call','scenario_id':target}]
+                child['steps']=[{'type':'call','scenario_id':main['id']}] if target==child['id'] else []
+                with self.assertRaisesRegex(ValueError,'отсутствующий|Циклический'): model.validate(data)
+
+    def test_limits_include_each_invocation(self):
+        data=self.data()
+        main=data['scenarios'][0]
+        child=model.scenario('Подпрограмма')
+        data['scenarios'].append(child)
+        call={'type':'call','scenario_id':child['id']}
+        main['steps']=[call]*6
+        child['steps']=[{'type':'delay','seconds':600}]
+        self.assertIs(model.validate(data),data)
+        main['steps'].append(call)
+        with self.assertRaisesRegex(ValueError,'ожиданий'): model.validate(data)
+        main['steps']=[call]*2
+        child['steps']=[{'type':'keys','value':'z'}]*5000
+        with self.assertRaisesRegex(ValueError,'шагов с учётом вызовов'): model.validate(data)

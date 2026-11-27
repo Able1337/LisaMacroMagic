@@ -21,7 +21,7 @@ from engine import Player, Recorder, foreground
 from updates import UpdateCheck, RELEASE_URL
 import update_install
 
-VERSION = '0.5.17'
+VERSION = '0.5.18'
 WINDOW_TITLE = f"Lisa's Macro Magic 🎀 — v{VERSION}"
 STYLE = """
 QMainWindow, QDialog { background:#fff0f7; color:#684366; }
@@ -90,11 +90,12 @@ class Bridge(QObject):
 class StepDialog(QDialog):
     TYPES = [('keys','⌨ Клавиша / сочетание'), ('delay','⏱ Пауза'), ('wait_click','♡ Ждать ручной ЛКМ'), ('wait_key','♡ Ждать нажатия клавиши'),
              ('click','🖱 Клик по координатам'), ('click_here','🖱 Клик под курсором'),
-             ('repeat','↻ Повторить предыдущее действие'), ('move','↗ Перемещение мыши'), ('scroll','↕ Прокрутка'),
+             ('repeat','↻ Повторить предыдущее действие'), ('call','▶ Выполнить сценарий'),
+             ('move','↗ Перемещение мыши'), ('scroll','↕ Прокрутка'),
              ('key_down','Клавиша вниз (запись)'), ('key_up','Клавиша вверх (запись)'),
              ('mouse_down','Кнопка мыши вниз (запись)'), ('mouse_up','Кнопка мыши вверх (запись)')]
 
-    def __init__(self, step=None, parent=None):
+    def __init__(self, step=None, parent=None, call_targets=()):
         super().__init__(parent)
         self.setWindowTitle('Маленький шаг магии 🎀')
         self.setMinimumWidth(470)
@@ -110,9 +111,14 @@ class StepDialog(QDialog):
         self.dx, self.dy = QSpinBox(), QSpinBox()
         for field in (self.dx,self.dy): field.setRange(-100,100)
         self.dy.setValue(-1)
+        self.called_scenario = QComboBox()
+        self.called_scenario.setPlaceholderText('Выбери сценарий')
+        for scenario_id, title in call_targets:
+            self.called_scenario.addItem(title,scenario_id)
+        self.called_scenario.setCurrentIndex(-1)
         form.addRow('Тип шага',self.kind)
         self.fields = [('Клавиши', self.value),('Секунды / таймаут',self.seconds),('X экрана',self.x),('Y экрана',self.y),
-                       ('Кнопка',self.button),('Прокрутка X',self.dx),('Прокрутка Y',self.dy)]
+                       ('Кнопка',self.button),('Прокрутка X',self.dx),('Прокрутка Y',self.dy),('Сценарий',self.called_scenario)]
         for label, field in self.fields: form.addRow(label,field)
         layout.addLayout(form)
         self.hint = QLabel()
@@ -128,19 +134,23 @@ class StepDialog(QDialog):
             self.seconds.setValue(step.get('seconds',1))
             for name in ('x','y','dx','dy'): getattr(self,name).setValue(step.get(name,0))
             self.button.setCurrentText(step.get('button','left'))
+            if step['type']=='call':
+                self.called_scenario.setCurrentIndex(self.called_scenario.findData(step['scenario_id']))
         self.update_fields()
 
     def update_fields(self):
         kind = self.kind.currentData()
         visible = {
             'keys':{0}, 'key_down':{0}, 'key_up':{0}, 'delay':{1}, 'wait_click':{1}, 'wait_key':{0,1},
-            'move':{2,3}, 'click':{2,3,4}, 'click_here':{4}, 'repeat':set(),
+            'move':{2,3}, 'click':{2,3,4}, 'click_here':{4}, 'repeat':set(), 'call':{7},
             'mouse_down':{2,3,4}, 'mouse_up':{2,3,4}, 'scroll':{5,6}}
         for i, (_,field) in enumerate(self.fields):
             field.setVisible(i in visible[kind]); self.form.labelForField(field).setVisible(i in visible[kind])
         self.hint.setText({
             'repeat':'Повторяет последнее действие в этом сценарии, в том числе ручной ЛКМ. Можно добавить после паузы.',
             'click_here':'Нажимает выбранную кнопку там, где находится курсор в момент выполнения.',
+            'call':('Основной сценарий продолжится после завершения выбранного.' if self.called_scenario.count()
+                    else 'Сначала создай ещё один сценарий в этом проекте.'),
         }.get(kind,'Клавиши: z, enter, ctrl+shift+s. space = пробел.\nБуквы обозначают клавиши S/Ы, Z/Я и т. п., а не ввод текста.\nОжидание клавиши или ЛКМ продолжается после нажатия и отпускания.\nНажатие проходит в браузер. Координаты — пиксели экрана.'))
 
     def wait_key_defaults(self):
@@ -153,6 +163,7 @@ class StepDialog(QDialog):
         if kind in ('click','move','mouse_down','mouse_up'): result.update(x=self.x.value(),y=self.y.value())
         if kind in ('click','click_here','mouse_down','mouse_up'): result['button'] = self.button.currentText()
         if kind == 'scroll': result.update(dx=self.dx.value(),dy=self.dy.value())
+        if kind == 'call': result['scenario_id'] = self.called_scenario.currentData()
         return model.validate_step(result)
 
     def accept_checked(self):
@@ -475,7 +486,11 @@ class Window(QMainWindow):
         self.steps.clear()
         item=self.selected()
         if item:
-            for i,step in enumerate(item['steps']): self.steps.addItem(f'{i+1:02d}   {model.describe(step)}')
+            names={scenario['id']:scenario['name'] for scenario in self.scenarios}
+            for i,step in enumerate(item['steps'],1):
+                called_name=names.get(step['scenario_id']) if step['type']=='call' else None
+                description=model.describe(step,called_name)
+                self.steps.addItem(f'{i:02d}   {description}')
             if self.list.item(self.current):
                 self.list.item(self.current).setText(f"{item['name']}\n{item['bind'] or 'Без бинда'}  ·  {len(item['steps'])} шагов")
         self.steps.setCurrentRow(row)
@@ -505,12 +520,21 @@ class Window(QMainWindow):
         self.scenarios.append(new); self.changed(); self.refresh_list(len(self.scenarios)-1)
 
     def delete_scenario(self):
-        if self.selected() and QMessageBox.question(self,'Удалить сценарий?','Удалить выбранный сценарий из текущего проекта?')==QMessageBox.StandardButton.Yes:
+        selected=self.selected()
+        if not selected: return
+        for item in self.scenarios:
+            if any(step['type']=='call' and step['scenario_id']==selected['id'] for step in item['steps']):
+                return self.error(f"Сначала убери этот вызов из сценария «{item['name']}».")
+        if QMessageBox.question(self,'Удалить сценарий?','Удалить выбранный сценарий из текущего проекта?')==QMessageBox.StandardButton.Yes:
             self.scenarios.pop(self.current); self.changed(); self.refresh_list(0 if self.scenarios else -1); self.configure_hotkeys()
+
+    def call_targets(self):
+        return [(item['id'],f"{index+1}. {item['name']}")
+                for index,item in enumerate(self.scenarios) if index!=self.current]
 
     def add_step(self):
         if not self.selected(): return
-        dialog=StepDialog(parent=self)
+        dialog=StepDialog(parent=self,call_targets=self.call_targets())
         if dialog.exec():
             steps=self.selected()['steps'].copy(); row=self.steps.currentRow()+1 if self.steps.currentRow()>=0 else len(steps)
             steps.insert(row,dialog.result_step()); self.replace_steps(steps,row)
@@ -518,7 +542,7 @@ class Window(QMainWindow):
     def edit_step(self,*args):
         row=self.steps.currentRow()
         if not self.selected() or row<0: return
-        dialog=StepDialog(self.selected()['steps'][row],self)
+        dialog=StepDialog(self.selected()['steps'][row],self,call_targets=self.call_targets())
         if dialog.exec():
             steps=self.selected()['steps'].copy()
             steps[row]=dialog.result_step(); self.replace_steps(steps,row)
@@ -537,9 +561,12 @@ class Window(QMainWindow):
             self.replace_steps(steps,row+delta)
 
     def replace_steps(self,steps,row):
-        try: model.validate_repeats(steps)
+        selected=self.selected()
+        try:
+            model.validate_repeats(steps)
+            model.validate_calls([{**item,'steps':steps} if item is selected else item for item in self.scenarios])
         except ValueError as exc: return self.error(exc)
-        self.selected()['steps']=steps
+        selected['steps']=steps
         self.changed(); self.refresh_steps(row)
 
     def configure_hotkeys(self,*args):
@@ -592,11 +619,12 @@ class Window(QMainWindow):
             if triggered: self.set_status(f"{item['name']} · {exc}")
             else: self.error(exc)
             return
-        player=Player(copy.deepcopy(item['steps']),
+        scenarios=copy.deepcopy({scenario['id']:scenario for scenario in self.scenarios})
+        player=Player(scenarios[scenario_id]['steps'],
             lambda text:self.bridge.status.emit(scenario_id,text),
             lambda text:self.bridge.finished.emit(scenario_id,text),
             stop_label=self.settings['control_bind'],trigger_modifiers=model.hotkey(item['bind'])[0] if triggered and item['bind'] else 0,
-            allowed_windows=self.allowed_test_windows(),input_lock=self.input_lock)
+            allowed_windows=self.allowed_test_windows(),input_lock=self.input_lock,scenarios=scenarios)
         with self.playback_lock:
             if self.stopping_playback: return
             self.playbacks[scenario_id]=(item['name'],player)
@@ -741,6 +769,7 @@ class Window(QMainWindow):
             '«Ждать ручной ЛКМ» продолжает после твоего клика и отпускания кнопки.\n'
             'Координаты кликов можно получить записью движений и затем отредактировать.\n'
             '«Клик под курсором» нажимает без заданных координат. «Повторить предыдущее действие» работает и после паузы.\n'
+            '«Выполнить сценарий» добавляет другой макрос в текущий. После него выполняется следующий шаг.\n'
             'Пока сценарий ждёт, другой сценарий можно запустить его биндом. «Стоп» останавливает все запуски.\n'
             'Если исходное окно не вернётся за 0,3 с, сценарий остановится. При записи остановка происходит сразу.\n'
             'Roadcons настраивается тобой: программа не распознаёт объекты карты.\n'

@@ -28,8 +28,9 @@ def key_is_down(vk):
 
 class Player:
     def __init__(self, steps, status, finished, backend=None, focus=foreground, stop_label='F12',
-                 trigger_modifiers=0, allowed_windows=(), input_lock=None):
+                 trigger_modifiers=0, allowed_windows=(), input_lock=None, scenarios=None):
         self.steps, self.status, self.finished = steps, status, finished
+        self.scenarios = scenarios if scenarios is not None else {}
         self.cancel = threading.Event()
         self.focus = focus
         self.backend = backend
@@ -39,6 +40,8 @@ class Player:
         self.trigger_modifiers=trigger_modifiers
         self.allowed_windows=frozenset(allowed_windows)
         self.input_lock = input_lock if input_lock is not None else threading.Lock()
+        self.owns_input = False
+        self.step_location = ''
 
     def stop(self): self.cancel.set()
 
@@ -58,6 +61,22 @@ class Player:
     def acquire_input(self):
         while not self.input_lock.acquire(timeout=0.02):
             self.check()
+        self.owns_input = True
+
+    def release_input(self):
+        self.input_lock.release()
+        self.owns_input = False
+
+    def release_held(self, keep_keys=(), keep_buttons=()):
+        error = None
+        for held, keep, controller in ((self.keys, keep_keys, self.backend[2]),
+                                       (self.buttons, keep_buttons, self.backend[3])):
+            for value in reversed(held.copy()):
+                if value in keep: continue
+                try: controller.release(value)
+                except Exception as exc: error = exc
+                else: held.remove(value)
+        return error
 
     def wait(self, seconds):
         end = time.monotonic() + seconds
@@ -195,11 +214,41 @@ class Player:
             return step
         elif kind == 'scroll': self.backend[3].scroll(step['dx'], step['dy'])
 
+    def play_steps(self, steps, path=''):
+        previous = None
+        for number, step in enumerate(steps, 1):
+            location = f'{path}{number}/{len(steps)}'
+            self.step_location = location
+            self.check()
+            kind = step['type']
+            if kind == 'repeat' and previous is None: raise ValueError(REPEAT_ERROR)
+
+            # Other players can send input during a wait unless a key or button is held.
+            if kind in WAIT_STEPS and self.owns_input and not (self.keys or self.buttons):
+                self.release_input()
+            called = self.scenarios.get(step['scenario_id']) if kind == 'call' else None
+            if kind == 'call' and called is None:
+                raise ValueError('Сценарий для выполнения отсутствует.')
+            text = describe(step, called['name'] if called is not None else None)
+            self.status(f'Шаг {location} · {text} · {self.stop_label} — стоп')
+            if called is not None:
+                keep_keys, keep_buttons = tuple(self.keys), tuple(self.buttons)
+                self.play_steps(called['steps'], f"{location} → «{called['name']}» ")
+                error = self.release_held(keep_keys, keep_buttons)
+                if error is not None: raise error
+                self.step_location = location
+                previous = None
+            else:
+                if kind not in WAIT_STEPS and not self.owns_input: self.acquire_input()
+                self.check()
+                performed = self.execute(previous if kind == 'repeat' else step)
+                if kind not in KEEP_REPEAT_SOURCE:
+                    previous = (performed or step) if kind in REPEAT_SOURCES else None
+            self.wait(0.01)
+
     def run(self, countdown=3):
         message = 'Готово ♡'
-        step_number = 0
-        owns_input = False
-        previous = None
+        self.step_location = ''
         try:
             if self.backend is None:
                 from pynput import keyboard, mouse
@@ -217,38 +266,15 @@ class Player:
             if not hwnd or (pid == os.getpid() and hwnd not in self.allowed_windows):
                 raise RuntimeError('Выбрано окно редактора. При задержке 0 запускай биндом из браузера; для кнопки задай задержку и переключись в целевое окно.')
             self.target = hwnd
-            for step_number, step in enumerate(self.steps, 1):
-                self.check()
-                kind = step['type']
-                if kind == 'repeat' and previous is None: raise ValueError(REPEAT_ERROR)
-                action = previous if kind == 'repeat' else step
-                # Let other players send input during a wait, unless a drag or key hold is in progress.
-                if kind in WAIT_STEPS and owns_input and not (self.keys or self.buttons):
-                    self.input_lock.release()
-                    owns_input = False
-                self.status(f"Шаг {step_number}/{len(self.steps)} · {describe(step)} · {self.stop_label} — стоп")
-                if kind not in WAIT_STEPS and not owns_input:
-                    self.acquire_input()
-                    owns_input = True
-                self.check()
-                performed = self.execute(action)
-                if kind not in KEEP_REPEAT_SOURCE:
-                    previous = (performed or step) if kind in REPEAT_SOURCES else None
-                self.wait(0.01)
+            self.play_steps(self.steps)
         except Cancelled:
             message = 'Остановлено. Все нажатые приложением клавиши отпущены.'
         except Exception as exc:
-            where = f' на шаге {step_number}/{len(self.steps)}' if step_number else ''
+            where = f' на шаге {self.step_location}' if self.step_location else ''
             message = f'Ошибка{where}: {exc}'
         finally:
-            if self.backend:
-                for key in reversed(self.keys):
-                    try: self.backend[2].release(key)
-                    except Exception: pass
-                for button in reversed(self.buttons):
-                    try: self.backend[3].release(button)
-                    except Exception: pass
-            if owns_input: self.input_lock.release()
+            if self.backend: self.release_held()
+            if self.owns_input: self.release_input()
             self.finished(message)
 
 

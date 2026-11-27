@@ -62,6 +62,40 @@ class GuiTests(unittest.TestCase):
             error.assert_called_once()
         self.assertEqual(w.selected()['steps'][-2:],[click,repeat])
 
+    def test_scenario_step_survives_rename_and_protects_its_target(self):
+        w=self.window
+        main=w.selected()
+        w.new_scenario()
+        child=w.selected()
+        w.list.setCurrentRow(0)
+        dialog=app.StepDialog(parent=w,call_targets=w.call_targets())
+        dialog.kind.setCurrentIndex(dialog.kind.findData('call'))
+        with self.assertRaisesRegex(ValueError,'Выбери сценарий'):
+            dialog.result_step()
+        dialog.called_scenario.setCurrentIndex(dialog.called_scenario.findData(child['id']))
+        step={'type':'call','scenario_id':child['id']}
+        self.assertEqual(dialog.result_step(),step)
+        with patch('app.StepDialog',return_value=dialog), patch.object(dialog,'exec',return_value=True):
+            w.add_step()
+        dialog.close()
+        w.list.setCurrentRow(1)
+        w.name.setText('Заливка')
+        self.assertTrue(w.apply_details())
+        with patch.object(w,'error') as error, patch.object(app.QMessageBox,'question') as confirm:
+            w.replace_steps([{'type':'call','scenario_id':main['id']}],0)
+            self.assertIn('Циклический',str(error.call_args.args[0]))
+            self.assertEqual(child['steps'],[])
+            w.delete_scenario()
+            self.assertIn(main['name'],error.call_args.args[0])
+            confirm.assert_not_called()
+        w.list.setCurrentRow(0)
+        self.assertIn('Заливка',w.steps.item(w.steps.count()-1).text())
+        edit=app.StepDialog(step,parent=w,call_targets=w.call_targets())
+        self.assertEqual(edit.result_step(),step)
+        edit.close()
+        self.assertTrue(w.autosave())
+        self.assertEqual(app.model.load(self.path)[0]['steps'][-1],step)
+
     def test_time_hint_only_in_deck_and_footer_tooltip(self):
         from affirmations import TIME_HINT,PHRASES
         self.assertEqual(self.window.love_note.toolTip(),TIME_HINT)

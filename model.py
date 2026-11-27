@@ -6,7 +6,9 @@ import uuid
 DEFAULT_SETTINGS = {'start_delay': 0, 'record_delay': 3, 'control_bind': 'F12', 'theme': 'pink'}
 
 KINDS = {'keys', 'delay', 'wait_click', 'wait_key', 'click', 'move', 'scroll',
-         'key_down', 'key_up', 'mouse_down', 'mouse_up', 'click_here', 'repeat'}
+         'key_down', 'key_up', 'mouse_down', 'mouse_up', 'click_here', 'repeat', 'call'}
+MAX_SCENARIO_STEPS = 10000
+MAX_WAIT_SECONDS = 3600
 WAIT_STEPS = {'delay', 'wait_click', 'wait_key'}
 REPEAT_SOURCES = {'keys', 'click', 'click_here', 'wait_click', 'move', 'scroll'}
 KEEP_REPEAT_SOURCE = {'delay', 'wait_key', 'repeat'}
@@ -73,6 +75,8 @@ def validate_step(step):
         for axis in ('dx', 'dy'):
             number(step.get(axis), -100, 100)
             if type(step[axis]) is not int: raise ValueError('Прокрутка должна быть целой.')
+    if kind == 'call' and (not isinstance(step.get('scenario_id'), str) or not step['scenario_id']):
+        raise ValueError('Выбери сценарий для выполнения.')
     return step
 
 
@@ -88,6 +92,43 @@ def validate_repeats(steps):
 
 def scenario(name='Новая магия', bind=''):
     return {'id': uuid.uuid4().hex, 'name': name, 'bind': bind, 'steps': []}
+
+
+def validate_calls(scenarios):
+    by_id = {item['id']:item for item in scenarios}
+    visiting = set()
+    totals = {}
+
+    def measure(scenario_id):
+        if scenario_id in totals: return totals[scenario_id]
+        item = by_id[scenario_id]
+        name = item['name']
+        if scenario_id in visiting:
+            raise ValueError(f'Циклический вызов сценария «{name}». Проверь цепочку вызовов.')
+        visiting.add(scenario_id)
+        count = len(item['steps'])
+        seconds = 0
+        for step in item['steps']:
+            kind = step['type']
+            if kind in WAIT_STEPS:
+                seconds += step['seconds']
+            elif kind == 'call':
+                target = step['scenario_id']
+                if target not in by_id:
+                    raise ValueError(f'Сценарий «{name}» вызывает отсутствующий сценарий.')
+                child_count, child_seconds = measure(target)
+                count += child_count
+                seconds += child_seconds
+        if count > MAX_SCENARIO_STEPS:
+            raise ValueError(f'В сценарии «{name}» больше {MAX_SCENARIO_STEPS} шагов с учётом вызовов.')
+        if seconds > MAX_WAIT_SECONDS:
+            raise ValueError(f'Сумма ожиданий сценария «{name}» с учётом вызовов — не более часа.')
+        visiting.remove(scenario_id)
+        totals[scenario_id] = count, seconds
+        return totals[scenario_id]
+
+    for scenario_id in by_id:
+        measure(scenario_id)
 
 
 def validate(data):
@@ -107,17 +148,14 @@ def validate(data):
             normalized = hotkey(item['bind'])
             if normalized in binds: raise ValueError('Бинд совпадает с другим сценарием или управляющей клавишей.')
             binds.add(normalized)
-        if not isinstance(item.get('steps'), list) or len(item['steps']) > 10000:
-            raise ValueError('Не более 10000 шагов в сценарии.')
-        seconds = 0
+        if not isinstance(item.get('steps'), list) or len(item['steps']) > MAX_SCENARIO_STEPS:
+            raise ValueError(f'Не более {MAX_SCENARIO_STEPS} шагов в сценарии.')
         for step in item['steps']:
             validate_step(step)
-            if step['type'] in WAIT_STEPS:
-                seconds += step['seconds']
         validate_repeats(item['steps'])
-        if seconds > 3600: raise ValueError('Сумма ожиданий сценария — не более часа.')
         total += len(item['steps'])
     if total > 20000: raise ValueError('Не более 20000 шагов в файле.')
+    validate_calls(data['scenarios'])
     for item in data['scenarios']:
         for step in item['steps']:
             if step['type']=='wait_key' and (0,simple_vk(step['value'])) in binds:
@@ -163,7 +201,7 @@ def save(path, scenarios, settings=None):
         if name and os.path.exists(name): os.unlink(name)
 
 
-def describe(step):
+def describe(step, called_name=None):
     kind = step['type']
     if kind == 'keys': return '⌨  ' + step['value']
     if kind == 'delay': return f"⏱  Пауза {step['seconds']:g} с"
@@ -171,6 +209,7 @@ def describe(step):
     if kind == 'wait_key': return f"♡  Ждать {step['value']} (до {step['seconds']:g} с)"
     if kind == 'click_here': return f"🖱  Клик под курсором ({step['button']})"
     if kind == 'repeat': return '↻  Повторить предыдущее действие'
+    if kind == 'call': return f'▶  Выполнить сценарий «{called_name}»' if called_name else '▶  Выполнить сценарий'
     if kind in ('key_down', 'key_up'): return f"⌨  {step['value']} {'↓' if kind == 'key_down' else '↑'}"
     if kind == 'scroll': return f"↕  Прокрутка {step['dx']}, {step['dy']}"
     return f"{'↗' if kind == 'move' else '🖱'}  {kind}: {step.get('button', '')} ({step['x']}, {step['y']})"
